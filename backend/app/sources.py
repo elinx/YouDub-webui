@@ -76,3 +76,24 @@ def detect_source(url: str) -> SourceConfig:
         if source.matches(url):
             return source
     raise ValueError(f"No source matches URL: {url}")
+
+
+def source_with_language(url: str, language: str | None = None) -> SourceConfig:
+    """Return a SourceConfig with an optional language override.
+
+    When *language* is provided (and not "auto"), the returned config
+    overrides asr_language and infers target_language as the opposite
+    direction (en↔zh).  Otherwise delegates to detect_source().
+    """
+    source = detect_source(url)
+    if not language or language == "auto":
+        return source
+    target = "en" if language == "zh" else "zh"
+    return SourceConfig(
+        name=source.name,
+        matches=source.matches,
+        use_proxy=source.use_proxy,
+        cookie_filename=source.cookie_filename,
+        asr_language=language,
+        target_language=target,
+    )

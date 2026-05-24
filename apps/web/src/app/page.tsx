@@ -3,12 +3,14 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react"
-import { ChevronRight, Play, Upload } from "lucide-react"
+import { ChevronRight, FileText, Mic, Music, Play, Upload } from "lucide-react"
 
 import {
+  PipelineInfo,
   TaskSummary,
   LocalDirection,
   createTask,
+  listPipelines,
   listTasks,
   uploadLocalTask,
 } from "@/lib/api"
@@ -38,6 +40,26 @@ function isActive(status: string) {
   return status === "queued" || status === "running"
 }
 
+function pipelineIcon(name: string) {
+  if (name === "full") return <Mic className="size-4" />
+  if (name === "subtitles") return <FileText className="size-4" />
+  if (name === "summarize") return <FileText className="size-4" />
+  if (name === "karaoke") return <Music className="size-4" />
+  return <Play className="size-4" />
+}
+
+const pipelineBadgeColors: Record<string, string> = {
+  full: "bg-[#00aeec]/15 text-[#00aeec] border-transparent",
+  subtitles: "bg-purple-500/15 text-purple-600 border-transparent",
+  summarize: "bg-emerald-500/15 text-emerald-600 border-transparent",
+  karaoke: "bg-orange-500/15 text-orange-600 border-transparent",
+}
+
+function pipelineBadgeClass(name: string | null) {
+  if (!name) return "bg-muted text-foreground border-border"
+  return pipelineBadgeColors[name] || "bg-muted text-foreground border-border"
+}
+
 function formatTime(value: string | null) {
   if (!value) return ""
   const date = new Date(value)
@@ -61,6 +83,9 @@ export default function Home() {
   const [bilibiliUrl, setBilibiliUrl] = useState("")
   const [localFile, setLocalFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
+  const [pipelines, setPipelines] = useState<PipelineInfo[]>([])
+  const [selectedPipeline, setSelectedPipeline] = useState("full")
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("auto")
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -90,6 +115,12 @@ export default function Home() {
     }
   }, [t.home.loadError])
 
+  useEffect(() => {
+    listPipelines()
+      .then(({ pipelines: list }) => setPipelines(list))
+      .catch(() => undefined)
+  }, [])
+
   function selectLocalFile(event: ChangeEvent<HTMLInputElement>) {
     setError("")
     setLocalFile(event.target.files?.[0] || null)
@@ -103,8 +134,8 @@ export default function Home() {
     setSubmitting(true)
     try {
       const created = localFile
-        ? await uploadLocalTask(localFile, localDirection)
-        : await createTask(submittedUrl)
+        ? await uploadLocalTask(localFile, localDirection, selectedPipeline, selectedLanguage)
+        : await createTask(submittedUrl, selectedPipeline, selectedLanguage)
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
@@ -137,6 +168,79 @@ export default function Home() {
           <CardContent>
             <form onSubmit={submitTask} className="space-y-4">
               <div className="space-y-2">
+                <Label>Pipeline</Label>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {pipelines.map((p) => (
+                    <button
+                      key={p.name}
+                      type="button"
+                      onClick={() => setSelectedPipeline(p.name)}
+                      className={`flex flex-col items-center gap-1 rounded-lg border-2 px-3 py-2.5 text-center transition-all ${
+                        selectedPipeline === p.name
+                          ? "border-[#00aeec] bg-[#00aeec]/5 shadow-sm"
+                          : "border-border bg-background hover:border-[#00aeec]/40 hover:bg-muted/40"
+                      }`}
+                    >
+                      <div className={`${selectedPipeline === p.name ? "text-[#00aeec]" : "text-muted-foreground"}`}>
+                        {pipelineIcon(p.name)}
+                      </div>
+                      <span className="text-xs font-medium leading-tight">{p.label}</span>
+                      <span className="text-[10px] leading-tight text-muted-foreground">
+                        {p.stages.length} step{p.stages.length !== 1 ? "s" : ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {pipelines.length > 0 && selectedPipeline ? (
+                  <p className="text-xs text-muted-foreground">
+                    {pipelines.find((p) => p.name === selectedPipeline)?.description}
+                  </p>
+                ) : null}
+              </div>
+              <div className="space-y-2">
+                <Label>Video language</Label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLanguage("auto")}
+                    className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      selectedLanguage === "auto"
+                        ? "border-[#00aeec] bg-[#00aeec]/10 text-[#00aeec]"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    Auto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLanguage("en")}
+                    className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      selectedLanguage === "en"
+                        ? "border-[#00aeec] bg-[#00aeec]/10 text-[#00aeec]"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    English
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLanguage("zh")}
+                    className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                      selectedLanguage === "zh"
+                        ? "border-[#00aeec] bg-[#00aeec]/10 text-[#00aeec]"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/40"
+                    }`}
+                  >
+                    Chinese
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {selectedLanguage === "auto"
+                    ? "Language detected automatically from URL"
+                    : `Override: ASR will use ${selectedLanguage === "en" ? "English" : "Chinese"}`}
+                </p>
+              </div>
+              <div className="space-y-2">
                 <Label htmlFor="youtube-url">{t.home.youtubeLabel}</Label>
                 <Input
                   id="youtube-url"
@@ -146,16 +250,18 @@ export default function Home() {
                   disabled={Boolean(bilibiliUrl.trim()) || hasLocalFile}
                 />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="bilibili-url">{t.home.bilibiliLabel}</Label>
-                <Input
-                  id="bilibili-url"
-                  value={bilibiliUrl}
-                  onChange={(event) => setBilibiliUrl(event.target.value)}
-                  placeholder="https://www.bilibili.com/video/BV..."
-                  disabled={Boolean(youtubeUrl.trim()) || hasLocalFile}
-                />
-              </div>
+              {selectedPipeline === "summarize" ? null : (
+                <div className="space-y-2">
+                  <Label htmlFor="bilibili-url">{t.home.bilibiliLabel}</Label>
+                  <Input
+                    id="bilibili-url"
+                    value={bilibiliUrl}
+                    onChange={(event) => setBilibiliUrl(event.target.value)}
+                    placeholder="https://www.bilibili.com/video/BV..."
+                    disabled={Boolean(youtubeUrl.trim()) || hasLocalFile}
+                  />
+                </div>
+              )}
               <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
                 <div className="space-y-2">
                   <Label htmlFor="local-video">{t.home.localVideoLabel}</Label>
@@ -168,22 +274,24 @@ export default function Home() {
                     disabled={hasUrl}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="local-direction">{t.home.localDirectionLabel}</Label>
-                  <Select
-                    value={localDirection}
-                    onValueChange={(value) => setLocalDirection(value as LocalDirection)}
-                    disabled={hasUrl}
-                  >
-                    <SelectTrigger id="local-direction" className="h-10">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="en-zh">{t.home.localEnZh}</SelectItem>
-                      <SelectItem value="zh-en">{t.home.localZhEn}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                {selectedPipeline === "summarize" ? null : (
+                  <div className="space-y-2">
+                    <Label htmlFor="local-direction">{t.home.localDirectionLabel}</Label>
+                    <Select
+                      value={localDirection}
+                      onValueChange={(value) => setLocalDirection(value as LocalDirection)}
+                      disabled={hasUrl}
+                    >
+                      <SelectTrigger id="local-direction" className="h-10">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="en-zh">{t.home.localEnZh}</SelectItem>
+                        <SelectItem value="zh-en">{t.home.localZhEn}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
               <div className="flex items-center justify-between gap-3">
                 {queued > 0 ? (
@@ -232,6 +340,9 @@ export default function Home() {
                           </p>
                           <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                             <Badge className={statusBadgeClass(item.status)}>{statusLabel(item.status)}</Badge>
+                            {item.pipeline && item.pipeline !== "full" ? (
+                              <Badge className={pipelineBadgeClass(item.pipeline)}>{item.pipeline}</Badge>
+                            ) : null}
                             <span>{formatTime(item.created_at)}</span>
                             {isActive(item.status) && item.current_stage ? (
                               <span>· {stageLabel(item.current_stage)}</span>

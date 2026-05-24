@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DB_PATH, ensure_runtime_dirs, openai_defaults, ytdlp_defaults
-from .stages import STAGES
+from .stages import PIPELINES, STAGES
 
 
 ACTIVE_STATUSES = ("queued", "running")
@@ -77,6 +77,10 @@ def init_db() -> None:
         task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "title" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN title TEXT")
+        if "pipeline" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT DEFAULT 'full'")
+        if "language" not in task_columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN language TEXT")
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
             conn.execute("ALTER TABLE task_stages ADD COLUMN progress INTEGER")
@@ -127,23 +131,25 @@ def fail_stale_active_tasks() -> None:
                 )
 
 
-def create_task(url: str, task_id: str | None = None) -> str:
+def create_task(url: str, task_id: str | None = None, pipeline: str = "full", language: str | None = None) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
+    pipeline_spec = PIPELINES.get(pipeline, PIPELINES["full"])
+    stage_labels = {s.name: s.label for s in STAGES}
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO tasks (id, url, status, current_stage, created_at)
-            VALUES (?, ?, 'queued', ?, ?)
+            INSERT INTO tasks (id, url, status, current_stage, created_at, pipeline, language)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?)
             """,
-            (new_id, url, STAGES[0].name, created_at),
+            (new_id, url, pipeline_spec.stages[0], created_at, pipeline, language),
         )
         conn.executemany(
             """
             INSERT INTO task_stages (task_id, name, label, status)
             VALUES (?, ?, ?, 'pending')
             """,
-            [(new_id, stage.name, stage.label) for stage in STAGES],
+            [(new_id, stage_name, stage_labels.get(stage_name, stage_name)) for stage_name in pipeline_spec.stages],
         )
     return new_id
 
@@ -176,7 +182,7 @@ def latest_task_id() -> str | None:
 def list_tasks(limit: int = 100) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, url, title, status, current_stage, final_video_path, error_message, "
+            "SELECT id, url, title, status, current_stage, pipeline, language, final_video_path, error_message, "
             "created_at, started_at, completed_at FROM tasks "
             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (limit,),
@@ -245,6 +251,87 @@ def reset_failed_for_resume(task_id: str) -> None:
             WHERE id = ?
             """,
             (task_id,),
+        )
+
+
+def _delete_stage_outputs(stage_name: str, session_path: str | None) -> None:
+    """Delete output files/artifacts for a stage so it will be regenerated on rerun."""
+    if not session_path:
+        return
+    session = Path(session_path)
+    files_to_delete: list[Path] = []
+    if stage_name == "download":
+        files_to_delete.append(session / "media" / "video_source.mp4")
+    elif stage_name == "separate":
+        files_to_delete.append(session / "media" / "audio_vocals.wav")
+        files_to_delete.append(session / "media" / "audio_bgm.wav")
+    elif stage_name == "asr":
+        files_to_delete.append(session / "metadata" / "asr.json")
+    elif stage_name == "asr_fix":
+        files_to_delete.append(session / "metadata" / "asr_fixed.json")
+    elif stage_name == "translate":
+        if (session / "metadata").exists():
+            for f in (session / "metadata").glob("translation.*.json"):
+                files_to_delete.append(f)
+    elif stage_name == "split_audio":
+        if (session / "segments" / "vocals").exists():
+            import shutil
+            shutil.rmtree(session / "segments" / "vocals", ignore_errors=True)
+    elif stage_name == "tts":
+        if (session / "segments" / "tts").exists():
+            import shutil
+            shutil.rmtree(session / "segments" / "tts", ignore_errors=True)
+    elif stage_name == "merge_audio":
+        files_to_delete.append(session / "tmp" / "audio_dubbing.wav")
+        files_to_delete.append(session / "metadata" / "timings.json")
+    elif stage_name == "merge_video":
+        files_to_delete.append(session / "media" / "video_final.mp4")
+    elif stage_name == "summarize":
+        files_to_delete.append(session / "metadata" / "summary.json")
+    for f in files_to_delete:
+        if f.exists():
+            f.unlink()
+
+
+def reset_stages_from(task_id: str, stage_name: str) -> None:
+    """Reset a specific stage and all subsequent stages to pending, allowing re-run from that point."""
+    task = get_task(task_id)
+    if not task:
+        return
+
+    pipeline_name = task.get("pipeline") or "full"
+    pipeline = PIPELINES.get(pipeline_name, PIPELINES["full"])
+
+    stage_names = list(pipeline.stages)
+    if stage_name not in stage_names:
+        raise ValueError(f"Stage '{stage_name}' not found in pipeline '{pipeline_name}'")
+
+    start_index = stage_names.index(stage_name)
+    stages_to_reset = stage_names[start_index:]
+
+    session_path = task.get("session_path")
+    for s in stages_to_reset:
+        _delete_stage_outputs(s, session_path)
+
+    with connect() as conn:
+        for s in stages_to_reset:
+            conn.execute(
+                """
+                UPDATE task_stages
+                SET status = 'pending', started_at = NULL, completed_at = NULL,
+                    last_message = NULL, error_message = NULL
+                WHERE task_id = ? AND name = ?
+                """,
+                (task_id, s),
+            )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'queued', current_stage = ?, error_message = NULL,
+                completed_at = NULL, started_at = NULL, final_video_path = NULL
+            WHERE id = ?
+            """,
+            (stage_name, task_id),
         )
 
 

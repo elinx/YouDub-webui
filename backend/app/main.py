@@ -34,6 +34,12 @@ def mask_secret(value: str) -> str:
 
 class TaskCreate(BaseModel):
     url: str
+    pipeline: str = "full"
+    language: str | None = None
+
+
+class RerunFromStage(BaseModel):
+    stage: str
 
 
 class YouTubeCookieUpdate(BaseModel):
@@ -144,6 +150,22 @@ def _ensure_runtime_ready() -> None:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/api/pipelines")
+def list_pipelines() -> dict:
+    from .stages import PIPELINES
+    return {
+        "pipelines": [
+            {
+                "name": p.name,
+                "label": p.label,
+                "description": p.description,
+                "stages": list(p.stages),
+            }
+            for p in PIPELINES.values()
+        ]
+    }
+
+
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
     try:
@@ -153,10 +175,16 @@ def create_task(payload: TaskCreate) -> dict:
 
     existing_id = database.find_task_by_video_id(video_id)
     if existing_id:
-        return database.get_task(existing_id)
+        existing = database.get_task(existing_id)
+        if existing and existing.get("pipeline") == payload.pipeline:
+            return existing
+        # Same video but different pipeline — use a new task ID to avoid PRIMARY KEY conflict
+        task_id_for_new_pipeline = None
+    else:
+        task_id_for_new_pipeline = video_id
 
     _ensure_runtime_ready()
-    task_id = database.create_task(payload.url.strip(), task_id=video_id)
+    task_id = database.create_task(payload.url.strip(), task_id=task_id_for_new_pipeline, pipeline=payload.pipeline, language=payload.language)
     worker.enqueue(task_id)
     return database.get_task(task_id)
 
@@ -192,7 +220,7 @@ def _save_uploaded_file(file: UploadFile, destination: Path) -> int:
 
 
 @app.post("/api/tasks/upload", status_code=201)
-def upload_local_video(direction: str = Form("en-zh"), file: UploadFile = File(...)) -> dict:
+def upload_local_video(direction: str = Form("en-zh"), pipeline: str = Form("full"), language: str | None = Form(None), file: UploadFile = File(...)) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
 
@@ -208,7 +236,7 @@ def upload_local_video(direction: str = Form("en-zh"), file: UploadFile = File(.
         raise
 
     url = f"local://upload/{task_id}?direction={direction}&filename={quote(original_name)}"
-    database.create_task(url, task_id=task_id)
+    database.create_task(url, task_id=task_id, pipeline=pipeline, language=language)
     database.update_task(task_id, title=Path(original_name).stem)
     worker.enqueue(task_id)
     return database.get_task(task_id)
@@ -276,8 +304,10 @@ def rerun_task(task_id: str) -> dict:
 
     _ensure_runtime_ready()
     url = task["url"]
+    pipeline = task.get("pipeline") or "full"
+    language = task.get("language")
     _purge_task(task)
-    new_id = database.create_task(url, task_id=task_id)
+    new_id = database.create_task(url, task_id=task_id, pipeline=pipeline, language=language)
     worker.enqueue(new_id)
     return database.get_task(new_id)
 
@@ -291,6 +321,23 @@ def resume_task(task_id: str) -> dict:
         raise HTTPException(status_code=409, detail="Only failed tasks can be resumed.")
     _ensure_runtime_ready()
     database.reset_failed_for_resume(task_id)
+    worker.enqueue(task_id)
+    return database.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/rerun-from")
+def rerun_from_stage(task_id: str, payload: RerunFromStage) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if task["status"] == "running":
+        raise HTTPException(status_code=409, detail="Cannot rerun a running task.")
+
+    try:
+        database.reset_stages_from(task_id, payload.stage)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     worker.enqueue(task_id)
     return database.get_task(task_id)
 
@@ -317,6 +364,22 @@ def final_video(task_id: str, download: bool = False) -> FileResponse:
         return FileResponse(final_path, media_type="video/mp4", filename=name)
     headers = {"Content-Disposition": f'inline; filename="{name}"'}
     return FileResponse(final_path, media_type="video/mp4", headers=headers)
+
+
+@app.get("/api/tasks/{task_id}/artifact/summary")
+def task_summary(task_id: str) -> dict:
+    import json
+
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    session_path = task.get("session_path")
+    if not session_path:
+        raise HTTPException(status_code=404, detail="Session not available.")
+    summary_path = Path(session_path) / "metadata" / "summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="Summary is not available.")
+    return json.loads(summary_path.read_text(encoding="utf-8"))
 
 
 @app.get("/api/cookies/youtube")

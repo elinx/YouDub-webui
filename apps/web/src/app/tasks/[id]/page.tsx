@@ -4,7 +4,10 @@ import { useRouter } from "next/navigation"
 import { use, useEffect, useMemo, useState } from "react"
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Circle,
+  Copy,
   Download,
   FileText,
   Loader2,
@@ -16,12 +19,15 @@ import {
 
 import {
   StageStatus,
+  SummaryData,
   Task,
   deleteTask,
   finalVideoDownloadUrl,
   finalVideoUrl,
   getTask,
   getTaskLog,
+  getTaskSummary,
+  rerunFromStage,
   rerunTask,
   resumeTask,
 } from "@/lib/api"
@@ -48,12 +54,32 @@ import {
 } from "@/components/ui/dialog"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import ReactMarkdown from "react-markdown"
 
 function stageIcon(status: StageStatus) {
   if (status === "succeeded") return <CheckCircle2 className="size-5 text-[#00aeec]" />
   if (status === "failed") return <XCircle className="size-5 text-[#ff0033]" />
   if (status === "running") return <Loader2 className="size-5 animate-spin text-[#fb7299]" />
   return <Circle className="size-5 text-muted-foreground" />
+}
+
+const pipelineBadgeColors: Record<string, string> = {
+  full: "bg-[#00aeec]/15 text-[#00aeec] border-transparent",
+  subtitles: "bg-purple-500/15 text-purple-600 border-transparent",
+  summarize: "bg-emerald-500/15 text-emerald-600 border-transparent",
+  karaoke: "bg-orange-500/15 text-orange-600 border-transparent",
+}
+
+function pipelineBadgeClass(name: string | null) {
+  if (!name) return "bg-muted text-foreground border-border"
+  return pipelineBadgeColors[name] || "bg-muted text-foreground border-border"
+}
+
+const pipelineLabels: Record<string, string> = {
+  full: "Full Dubbing",
+  subtitles: "Subtitles",
+  summarize: "Summarize",
+  karaoke: "Karaoke",
 }
 
 function formatTime(value: string | null) {
@@ -95,6 +121,12 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [rerunError, setRerunError] = useState("")
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState("")
+  const [rerunFromStageName, setRerunFromStageName] = useState<string | null>(null)
+  const [rerunningFrom, setRerunningFrom] = useState(false)
+  const [rerunFromError, setRerunFromError] = useState("")
+  const [summaryData, setSummaryData] = useState<SummaryData | null>(null)
+  const [summaryExpanded, setSummaryExpanded] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const handleDelete = async () => {
     setDeleting(true)
@@ -136,6 +168,22 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     }
   }
 
+  const handleRerunFrom = async () => {
+    if (!rerunFromStageName) return
+    setRerunningFrom(true)
+    setRerunFromError("")
+    try {
+      const next = await rerunFromStage(id, rerunFromStageName)
+      setRerunFromStageName(null)
+      setTask(next)
+      setLog("")
+    } catch (err) {
+      setRerunFromError(err instanceof Error ? err.message : "Failed to rerun from stage")
+    } finally {
+      setRerunningFrom(false)
+    }
+  }
+
   const isRunning = task?.status === "running"
   const isFailed = task?.status === "failed"
 
@@ -160,6 +208,17 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       window.clearInterval(interval)
     }
   }, [id, t.task.loadError])
+
+  useEffect(() => {
+    if (task?.status !== "succeeded" || task.pipeline !== "summarize") return
+    let cancelled = false
+    getTaskSummary(task.id)
+      .then((data) => {
+        if (!cancelled) setSummaryData(data)
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [task?.status, task?.pipeline, task?.id])
 
   const progress = useMemo(() => {
     if (!task?.stages?.length) return 0
@@ -189,7 +248,12 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           <CardHeader className="gap-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle>{t.task.overview}</CardTitle>
-              <Badge className={statusBadgeClass(task?.status)}>{statusLabel(task?.status)}</Badge>
+              <div className="flex items-center gap-2">
+                {task?.pipeline ? (
+                  <Badge className={pipelineBadgeClass(task.pipeline)}>{pipelineLabels[task.pipeline] || task.pipeline}</Badge>
+                ) : null}
+                <Badge className={statusBadgeClass(task?.status)}>{statusLabel(task?.status)}</Badge>
+              </div>
             </div>
             <Progress value={progress} />
           </CardHeader>
@@ -229,7 +293,49 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           </CardContent>
         </Card>
 
-        {task?.status === "succeeded" && task.final_video_path ? (
+        {task?.status === "succeeded" && task.pipeline === "summarize" && summaryData ? (
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle>Summary</CardTitle>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    navigator.clipboard.writeText(summaryData.summary_markdown)
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 2000)
+                  }}
+                >
+                  <Copy className="size-3.5" />
+                  {copied ? "Copied" : "Copy Markdown"}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <article className="markdown-summary">
+                <ReactMarkdown>{summaryData.summary_markdown}</ReactMarkdown>
+              </article>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setSummaryExpanded(!summaryExpanded)}
+                  className="flex items-center gap-1 text-xs font-medium text-[#00aeec] hover:underline"
+                >
+                  {summaryExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+                  {summaryExpanded ? "Hide full text" : "Show full text"}
+                </button>
+                {summaryExpanded ? (
+                  <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+                    {summaryData.full_text}
+                  </p>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {task?.status === "succeeded" && task.final_video_path && task.pipeline !== "karaoke" ? (
           <Card>
             <CardHeader>
               <CardTitle>{t.task.finalVideo}</CardTitle>
@@ -287,6 +393,16 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                               {stageProgress}%
                             </span>
                           </div>
+                        ) : null}
+                        {!isRunning && (stage.status === "succeeded" || stage.status === "failed") ? (
+                          <button
+                            type="button"
+                            onClick={() => setRerunFromStageName(stage.name)}
+                            className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
+                            title={`Rerun from ${stageLabel(stage.name, stage.label)}`}
+                          >
+                            <RotateCw className="size-3.5" />
+                          </button>
                         ) : null}
                       </div>
                     </li>
@@ -377,6 +493,30 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 </DialogContent>
               </Dialog>
             </div>
+            <Dialog open={rerunFromStageName !== null} onOpenChange={(open) => { if (!open) setRerunFromStageName(null) }}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Rerun from {rerunFromStageName ? stageLabel(rerunFromStageName, task?.stages.find(s => s.name === rerunFromStageName)?.label || rerunFromStageName) : ""}</DialogTitle>
+                  <DialogDescription>
+                    This will re-run from {rerunFromStageName ? stageLabel(rerunFromStageName, task?.stages.find(s => s.name === rerunFromStageName)?.label || rerunFromStageName) : ""} onwards. Earlier completed stages will reuse their cached results.
+                  </DialogDescription>
+                </DialogHeader>
+                {rerunFromError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {rerunFromError}
+                  </div>
+                ) : null}
+                <DialogFooter>
+                  <DialogClose render={<Button variant="outline" disabled={rerunningFrom} />}>
+                    {t.common.cancel}
+                  </DialogClose>
+                  <Button onClick={handleRerunFrom} disabled={rerunningFrom}>
+                    {rerunningFrom ? <Loader2 className="size-4 animate-spin" /> : <RotateCw className="size-4" />}
+                    {rerunningFrom ? "Rerunning…" : "Rerun from here"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-muted-foreground">
                 {t.task.deleteHelp} <code className="font-mono text-xs">workfolder/</code>

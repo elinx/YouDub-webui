@@ -23,12 +23,21 @@ export type TaskStage = {
   error_message: string | null
 }
 
+export type PipelineInfo = {
+  name: string
+  label: string
+  description: string
+  stages: string[]
+}
+
 export type Task = {
   id: string
   url: string
   title: string | null
   status: TaskStatus
   current_stage: string | null
+  pipeline: string | null
+  language: string | null
   session_path: string | null
   final_video_path: string | null
   error_message: string | null
@@ -88,6 +97,8 @@ export type TaskSummary = {
   title: string | null
   status: TaskStatus
   current_stage: string | null
+  pipeline: string | null
+  language: string | null
   final_video_path: string | null
   error_message: string | null
   created_at: string
@@ -123,20 +134,31 @@ export function rerunTask(taskId: string) {
   return request<Task>(`/api/tasks/${taskId}/rerun`, { method: "POST" })
 }
 
+export function rerunFromStage(taskId: string, stage: string) {
+  return request<Task>(`/api/tasks/${taskId}/rerun-from`, {
+    method: "POST",
+    body: JSON.stringify({ stage }),
+  })
+}
+
 export function resumeTask(taskId: string) {
   return request<Task>(`/api/tasks/${taskId}/resume`, { method: "POST" })
 }
 
-export function createTask(url: string) {
+export function createTask(url: string, pipeline = "full", language?: string | null) {
   return request<Task>("/api/tasks", {
     method: "POST",
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, pipeline, ...(language && language !== "auto" ? { language } : {}) }),
   })
 }
 
-export async function uploadLocalTask(file: File, direction: LocalDirection) {
+export async function uploadLocalTask(file: File, direction: LocalDirection, pipeline = "full", language?: string | null) {
   const form = new FormData()
   form.append("direction", direction)
+  form.append("pipeline", pipeline)
+  if (language && language !== "auto") {
+    form.append("language", language)
+  }
   form.append("file", file)
 
   const response = await fetch(`${API_BASE}/api/tasks/upload`, {
@@ -206,4 +228,18 @@ export function finalVideoUrl(taskId: string) {
 
 export function finalVideoDownloadUrl(taskId: string) {
   return `${API_BASE}/api/tasks/${taskId}/artifact/final-video?download=1`
+}
+
+export function listPipelines() {
+  return request<{ pipelines: PipelineInfo[] }>("/api/pipelines")
+}
+
+export type SummaryData = {
+  source_language: string
+  summary_markdown: string
+  full_text: string
+}
+
+export function getTaskSummary(taskId: string) {
+  return request<SummaryData>(`/api/tasks/${taskId}/artifact/summary`)
 }
